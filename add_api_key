@@ -1,35 +1,29 @@
 #!/usr/bin/env bash
 # add_api_key: Universal API Key Loader Script
 #
-# This script loads API keys (or any export commands) into your current shell
-# environment by extracting lines between <key_start> and </key_end> that start with "export".
+# This script loads API keys (or any environment variable settings) into your current shell
+# by extracting lines between <key_start> and </key_end> that begin with either "export" or "setx".
 #
-# It works in two modes:
+# On macOS/Linux (Unix-like systems), the script ensures that the commands are in export format,
+# then evaluates them to update the current shell.
 #
-#  • macOS: Uses AppleScript (via osascript) to fetch the note content from Apple Notes.
-#           The note is identified by the title stored in NOTE_TITLE (default "API Keys").
+# On Windows (Git Bash/Cygwin/MSYS), the script converts commands to setx commands so that they
+# update the registry for future sessions (note that setx does not affect the current session).
 #
-#  • Linux/Other: Falls back to reading a plain text file located at NOTES_FILE (default "$HOME/Notes.txt").
+# The script retrieves note content either via AppleScript (macOS) or from a fallback plain-text file.
 #
-# It then:
-#   1. Strips any HTML formatting (for example, if AppleScript returns HTML).
-#   2. Extracts lines that begin with "export" between the markers.
-#   3. Displays the cleaned note content and the extracted export statements.
-#   4. Prompts for confirmation before executing the export commands.
+# You can override the defaults by setting these environment variables before sourcing:
+#   NOTE_TITLE  - the title of your Apple Note (default: "API Keys")
+#   NOTES_FILE  - the fallback plain-text file path (default: "$HOME/Notes.txt")
 #
 # IMPORTANT: To update your current shell’s environment, you must source this script.
-# Example (using an alias):
+# Example alias:
 #   alias add_api_key='source /usr/local/bin/add_api_key'
-#
-# You can override the defaults by exporting these variables before sourcing:
-#   NOTE_TITLE  - the title of your Apple Note (macOS)
-#   NOTES_FILE  - the fallback plain text file path (Linux/Other)
-#
 
-# Determine the operating system
+# Detect operating system
 OS=$(uname)
 
-# Default settings (can be overridden by environment variables)
+# Default settings (can be overridden by preexporting these variables)
 NOTE_TITLE=${NOTE_TITLE:-"API Keys"}
 NOTES_FILE=${NOTES_FILE:-"$HOME/Notes.txt"}
 
@@ -37,19 +31,27 @@ echo "Retrieving note content for note titled: \"$NOTE_TITLE\"..."
 
 # Retrieve note content:
 if [[ "$OS" == "Darwin" ]]; then
-    # macOS: Fetch note from Apple Notes using AppleScript.
+    # macOS: Use AppleScript to fetch the note from Apple Notes.
     NOTE_CONTENT=$(osascript <<< "tell application \"Notes\"
     set theNote to first note whose name is \"$NOTE_TITLE\"
     return theNote's body
 end tell")
 else
-    # Linux/Other: Read from a fallback plain text file.
-    if [ ! -f "$NOTES_FILE" ]; then
-        echo "Error: Note file not found at $NOTES_FILE."
-        echo "Please export your note to that location or set NOTES_FILE accordingly."
-        return 1 2>/dev/null || exit 1
+    # For Linux/Other/Windows-like: if osascript exists, assume macOS-like behavior;
+    # otherwise, fall back to reading a plain-text file.
+    if command -v osascript >/dev/null 2>&1; then
+        NOTE_CONTENT=$(osascript <<< "tell application \"Notes\"
+        set theNote to first note whose name is \"$NOTE_TITLE\"
+        return theNote's body
+end tell")
+    else
+        if [ ! -f "$NOTES_FILE" ]; then
+            echo "Error: Note file not found at $NOTES_FILE."
+            echo "Please export your note to that location or set NOTES_FILE accordingly."
+            return 1 2>/dev/null || exit 1
+        fi
+        NOTE_CONTENT=$(cat "$NOTES_FILE")
     fi
-    NOTE_CONTENT=$(cat "$NOTES_FILE")
 fi
 
 if [ -z "$NOTE_CONTENT" ]; then
@@ -64,25 +66,89 @@ echo "----- Cleaned Note Content -----"
 echo "$cleaned"
 echo "--------------------------------"
 
-# Extract only lines that begin with "export" (ignoring any leading whitespace)
-# that occur between the markers <key_start> and </key_end>
-exports=$(echo "$cleaned" | awk '/<key_start>/{flag=1; next} /<\/key_end>/{flag=0} flag' | grep -E '^[[:space:]]*export')
+# Extract lines that begin with either "export" or "setx" (ignoring leading whitespace)
+exports=$(echo "$cleaned" | awk '/<key_start>/{flag=1; next} /<\/key_end>/{flag=0} flag' | grep -E '^[[:space:]]*(export|setx)')
 
 if [ -z "$exports" ]; then
-    echo "No export statements found between <key_start> and </key_end>."
+    echo "No export or setx statements found between <key_start> and </key_end>."
     return 1 2>/dev/null || exit 1
 fi
 
-echo "Extracted export statements:"
+echo "Extracted environment-setting statements:"
 echo "$exports"
 
-# Prompt the user for confirmation (compatible with both bash and zsh)
-echo -n "Execute these export commands? [y/N] "
+# Conversion functions
+convert_to_setx() {
+  # Convert a line starting with "export" into a setx command.
+  local line="$1"
+  # Remove leading whitespace and "export"
+  line=$(echo "$line" | sed -E 's/^[[:space:]]*export[[:space:]]+//')
+  local var=$(echo "$line" | cut -d'=' -f1)
+  local val=$(echo "$line" | cut -d'=' -f2-)
+  val=$(echo "$val" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')
+  echo "setx $var \"$val\""
+}
+
+convert_to_export() {
+  # Convert a line starting with "setx" into an export command.
+  local line="$1"
+  # Remove leading whitespace and "setx"
+  line=$(echo "$line" | sed -E 's/^[[:space:]]*setx[[:space:]]+//')
+  local var=$(echo "$line" | awk '{print $1}')
+  local val=$(echo "$line" | cut -d' ' -f2-)
+  val=$(echo "$val" | sed -E 's/^"//; s/"$//')
+  echo "export $var=$val"
+}
+
+# Build final command list in a variable
+final_commands=""
+while IFS= read -r line; do
+    if [[ "$OS" == *"MINGW"* || "$OS" == *"CYGWIN"* || "$OS" == *"MSYS"* ]]; then
+        # On Windows: ensure commands are in setx format.
+        if [[ "$line" =~ ^[[:space:]]*export ]]; then
+            conv=$(convert_to_setx "$line")
+            final_commands="$final_commands
+$conv"
+        elif [[ "$line" =~ ^[[:space:]]*setx ]]; then
+            final_commands="$final_commands
+$line"
+        fi
+    else
+        # On macOS/Linux: ensure commands are in export format.
+        if [[ "$line" =~ ^[[:space:]]*setx ]]; then
+            conv=$(convert_to_export "$line")
+            final_commands="$final_commands
+$conv"
+        elif [[ "$line" =~ ^[[:space:]]*export ]]; then
+            final_commands="$final_commands
+$line"
+        fi
+    fi
+done <<< "$exports"
+
+echo "Final commands to be executed:"
+echo "$final_commands"
+
+# Prompt the user for confirmation
+echo -n "Execute these environment-setting commands? [y/N] "
 read confirm
 if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     echo "Aborting execution."
     return 1 2>/dev/null || exit 1
 fi
 
-echo "Executing export statements..."
-eval "$exports"
+if [[ "$OS" == *"MINGW"* || "$OS" == *"CYGWIN"* || "$OS" == *"MSYS"* ]]; then
+    echo "Executing setx commands (Note: changes apply to future sessions only):"
+    # Execute each setx command
+    while IFS= read -r cmd; do
+        if [ -n "$cmd" ]; then
+            echo "Running: $cmd"
+            eval "$cmd"
+        fi
+    done <<< "$final_commands"
+    echo "setx commands executed. Please open a new shell to use the updated environment variables."
+else
+    echo "Executing export commands..."
+    eval "$final_commands"
+    echo "Environment variables updated in current shell."
+fi
