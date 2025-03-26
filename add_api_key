@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# add_api_key: Universal API Key Loader Script
+#
+# This script loads API keys (or any export commands) into your current shell
+# environment by extracting lines between <key_start> and </key_end> that start with "export".
+#
+# It works in two modes:
+#
+#  • macOS: Uses AppleScript (via osascript) to fetch the note content from Apple Notes.
+#           The note is identified by the title stored in NOTE_TITLE (default "API Keys").
+#
+#  • Linux/Other: Falls back to reading a plain text file located at NOTES_FILE (default "$HOME/Notes.txt").
+#
+# It then:
+#   1. Strips any HTML formatting (for example, if AppleScript returns HTML).
+#   2. Extracts lines that begin with "export" between the markers.
+#   3. Displays the cleaned note content and the extracted export statements.
+#   4. Prompts for confirmation before executing the export commands.
+#
+# IMPORTANT: To update your current shell’s environment, you must source this script.
+# Example (using an alias):
+#   alias add_api_key='source /usr/local/bin/add_api_key'
+#
+# You can override the defaults by exporting these variables before sourcing:
+#   NOTE_TITLE  - the title of your Apple Note (macOS)
+#   NOTES_FILE  - the fallback plain text file path (Linux/Other)
+#
+
+# Determine the operating system
+OS=$(uname)
+
+# Default settings (can be overridden by environment variables)
+NOTE_TITLE=${NOTE_TITLE:-"API Keys"}
+NOTES_FILE=${NOTES_FILE:-"$HOME/Notes.txt"}
+
+echo "Retrieving note content for note titled: \"$NOTE_TITLE\"..."
+
+# Retrieve note content:
+if [[ "$OS" == "Darwin" ]]; then
+    # macOS: Fetch note from Apple Notes using AppleScript.
+    NOTE_CONTENT=$(osascript <<< "tell application \"Notes\"
+    set theNote to first note whose name is \"$NOTE_TITLE\"
+    return theNote's body
+end tell")
+else
+    # Linux/Other: Read from a fallback plain text file.
+    if [ ! -f "$NOTES_FILE" ]; then
+        echo "Error: Note file not found at $NOTES_FILE."
+        echo "Please export your note to that location or set NOTES_FILE accordingly."
+        return 1 2>/dev/null || exit 1
+    fi
+    NOTE_CONTENT=$(cat "$NOTES_FILE")
+fi
+
+if [ -z "$NOTE_CONTENT" ]; then
+    echo "Error: No note content retrieved."
+    return 1 2>/dev/null || exit 1
+fi
+
+# Remove HTML tags and decode HTML markers (if present)
+cleaned=$(echo "$NOTE_CONTENT" | sed 's/<[^>]*>//g' | sed 's/&ltkey_start&gt/<key_start>/g; s/&lt\/key_end&gt/<\/key_end>/g')
+
+echo "----- Cleaned Note Content -----"
+echo "$cleaned"
+echo "--------------------------------"
+
+# Extract only lines that begin with "export" (ignoring any leading whitespace)
+# that occur between the markers <key_start> and </key_end>
+exports=$(echo "$cleaned" | awk '/<key_start>/{flag=1; next} /<\/key_end>/{flag=0} flag' | grep -E '^[[:space:]]*export')
+
+if [ -z "$exports" ]; then
+    echo "No export statements found between <key_start> and </key_end>."
+    return 1 2>/dev/null || exit 1
+fi
+
+echo "Extracted export statements:"
+echo "$exports"
+
+# Prompt the user for confirmation (compatible with both bash and zsh)
+echo -n "Execute these export commands? [y/N] "
+read confirm
+if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+    echo "Aborting execution."
+    return 1 2>/dev/null || exit 1
+fi
+
+echo "Executing export statements..."
+eval "$exports"
