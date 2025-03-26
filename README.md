@@ -101,4 +101,4 @@ source /usr/local/bin/add_api_key
 MIT
 
 ## Author
-RubberDucky_AU
+RubberDucky_AI
